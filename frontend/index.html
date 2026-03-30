@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Hierarchical Cancer Decision Support</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="page-shell">
+    <header class="hero">
+      <div>
+        <p class="eyebrow">Decision Support Pipeline</p>
+        <h1>Hierarchical Cancer Classification System</h1>
+        <p class="hero-copy">
+          Step 0 validates the input and estimates modality, Level 1 routes tissue, Level 2 decides normal versus abnormal,
+          and Level 3 explains subtype risk with filtered probabilities and safety warnings.
+        </p>
+      </div>
+      <div class="status-panel" id="modelStatus">
+        <h2>Model Status</h2>
+        <p>Checking local checkpoints...</p>
+      </div>
+    </header>
+
+    <main class="grid">
+      <section class="card upload-card">
+        <h2>Upload Image</h2>
+        <form id="predictionForm">
+          <label class="file-picker" for="imageInput">
+            <input id="imageInput" name="image" type="file" accept="image/*" required>
+            <span>Select image</span>
+          </label>
+
+          <div class="preview-shell">
+            <img id="imagePreview" alt="Preview will appear here">
+            <p id="previewPlaceholder">Image preview appears here after upload.</p>
+          </div>
+
+          <div class="controls">
+            <label class="checkbox-row">
+              <input id="manualOverride" type="checkbox">
+              <span>Allow override when Step 0 or Level 1 is uncertain</span>
+            </label>
+
+            <label for="organOverride">Manual organ/tissue override</label>
+            <select id="organOverride">
+              <option value="">No override</option>
+            </select>
+          </div>
+
+          <button class="primary-btn" id="submitButton" type="submit">Run Intelligent Pipeline</button>
+          <button class="secondary-btn" id="reportButton" type="button" disabled>Generate Report</button>
+          <p class="helper-text" id="reportStatus">Reports are saved to your Documents folder.</p>
+        </form>
+      </section>
+
+      <section class="card results-card">
+        <div class="section-header">
+          <h2>Results Panel</h2>
+          <span class="badge" id="requestState">Idle</span>
+        </div>
+
+        <section class="decision-banner empty-state" id="finalDecisionPanel">
+          Upload an image to see modality validation, tissue routing, normality, subtype analysis, warnings, and raw JSON.
+        </section>
+
+        <div id="warningList"></div>
+
+        <div class="stage-grid">
+          <article class="mini-card" id="modalityCard"></article>
+          <article class="mini-card" id="tissueCard"></article>
+          <article class="mini-card" id="normalityCard"></article>
+          <article class="mini-card" id="subtypeCard"></article>
+        </div>
+
+        <div class="chart-stack">
+          <section class="chart-card" id="organChart"></section>
+          <section class="chart-card" id="subtypeChart"></section>
+        </div>
+
+        <details class="raw-json">
+          <summary>Raw JSON</summary>
+          <pre id="jsonOutput">{}</pre>
+        </details>
+      </section>
+    </main>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
