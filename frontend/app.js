@@ -15,6 +15,7 @@ const modalityCard = document.getElementById("modalityCard");
 const tissueCard = document.getElementById("tissueCard");
 const normalityCard = document.getElementById("normalityCard");
 const subtypeCard = document.getElementById("subtypeCard");
+const gradcamPanel = document.getElementById("gradcamPanel");
 const organChart = document.getElementById("organChart");
 const subtypeChart = document.getElementById("subtypeChart");
 const jsonOutput = document.getElementById("jsonOutput");
@@ -70,6 +71,7 @@ function resetResults() {
     card.className = "mini-card empty";
     card.innerHTML = `<h3>${titles[index]}</h3><p>No result available for this stage.</p>`;
   });
+  renderGradcam(null);
   renderChart(organChart, null, "Organ Probability Graph");
   renderChart(subtypeChart, null, "Subtype Probability Graph");
 }
@@ -102,15 +104,26 @@ function renderModelStatus(payload) {
   const status = payload.model_status;
   latestModelStatus = status;
   populateOrganOverride(status.organ_options || []);
-  const subtypeState = status.subtype_ready ? "Ready" : status.subtype_checkpoint_exists ? "Checkpoint found, waiting to load" : "Waiting for subtype checkpoint";
+  const organReady = Boolean(status.organ_ready);
+  const subtypeReady = Boolean(status.subtype_ready);
+  const organState = organReady ? "Ready" : status.organ_error ? "Load failed" : "Waiting for checkpoint";
+  const subtypeState = subtypeReady
+    ? "Ready"
+    : status.subtype_error
+      ? "Load failed"
+      : status.subtype_checkpoint_exists
+        ? "Checkpoint found, waiting to load"
+        : "Waiting for subtype checkpoint";
   modelStatus.innerHTML = `
     <h2>Model Status</h2>
     <div class="metric"><span>Device</span><strong>${escapeHtml(status.device)}</strong></div>
-    <div class="metric"><span>Organ/Tissue Model</span><span class="status-pill ${toneClass("GREEN")}">Ready</span></div>
-    <div class="metric"><span>Subtype Model</span><span class="status-pill ${status.subtype_ready ? toneClass("GREEN") : toneClass("BLUE")}">${escapeHtml(subtypeState)}</span></div>
+    <div class="metric"><span>Organ/Tissue Model</span><span class="status-pill ${organReady ? toneClass("GREEN") : toneClass("RED")}">${escapeHtml(organState)}</span></div>
+    <div class="metric"><span>Subtype Model</span><span class="status-pill ${subtypeReady ? toneClass("GREEN") : status.subtype_error ? toneClass("RED") : toneClass("BLUE")}">${escapeHtml(subtypeState)}</span></div>
     <div class="metric"><span>Organ Classes</span><strong>${escapeHtml(status.organ_class_count)}</strong></div>
     <div class="metric"><span>Subtype Classes</span><strong>${escapeHtml(status.subtype_class_count)}</strong></div>
     <div class="metric"><span>Report Folder</span><strong>${escapeHtml(status.report_output_dir || "Documents")}</strong></div>
+    ${status.organ_error ? `<p class="helper-text">${escapeHtml(status.organ_error)}</p>` : ""}
+    ${status.subtype_error ? `<p class="helper-text">${escapeHtml(status.subtype_error)}</p>` : ""}
   `;
 }
 
@@ -197,12 +210,50 @@ function renderChart(container, chart, fallbackTitle = "Probability Graph") {
   `;
 }
 
+function renderGradcam(gradcam) {
+  const organCam = gradcam?.organ;
+  const subtypeCam = gradcam?.subtype;
+  const items = [organCam, subtypeCam].filter(Boolean);
+  if (items.length === 0) {
+    gradcamPanel.className = "chart-card gradcam-card empty";
+    gradcamPanel.innerHTML = `
+      <h3>Grad-CAM Review</h3>
+      <p>No Grad-CAM visual available for this prediction.</p>
+    `;
+    return;
+  }
+
+  gradcamPanel.className = "chart-card gradcam-card";
+  gradcamPanel.innerHTML = `
+    <div class="gradcam-header">
+      <h3>Grad-CAM Review</h3>
+      <p>Model attention heatmaps for organ routing and final outcome.</p>
+    </div>
+    <div class="gradcam-grid">
+      ${items.map((item) => `
+        <article class="gradcam-item">
+          <div class="gradcam-meta">
+            <h4>${escapeHtml(item.title || "Grad-CAM")}</h4>
+            <p>${escapeHtml(item.label || "Model attention map")}</p>
+          </div>
+          <img
+            class="gradcam-image"
+            src="data:${escapeHtml(item.mime_type || "image/png")};base64,${item.image_base64}"
+            alt="${escapeHtml(item.title || "Grad-CAM visualization")}"
+          >
+        </article>
+      `).join("")}
+    </div>
+  `;
+}
+
 function renderResult(result) {
   latestResult = result;
   reportButton.disabled = false;
   jsonOutput.textContent = JSON.stringify(result, null, 2);
   renderDecisionBanner(result);
   renderWarnings(result.warnings || []);
+  renderGradcam(result.gradcam);
 
   renderStageCard(modalityCard, "Step 0: Modality", result.modality, (stage) => `
     ${stageMetric("Type", stage.type || "N/A")}

@@ -26,6 +26,11 @@ class LoadedClassifier:
 
 
 def _torch_load(checkpoint_path: Path) -> Any:
+    header = checkpoint_path.read_bytes()[:512].lstrip()
+    if header.startswith(b'<!DOCTYPE html') or header.startswith(b'<html'):
+        raise ValueError(
+            f'Checkpoint file appears to contain HTML instead of PyTorch weights: {checkpoint_path}'
+        )
     try:
         return torch.load(checkpoint_path, map_location="cpu", weights_only=True)
     except pickle.UnpicklingError:

@@ -1,12 +1,16 @@
-﻿
+
 from __future__ import annotations
 
 import argparse
+import base64
+from io import BytesIO
 import json
 import logging
 from pathlib import Path
 
+import numpy as np
 import torch
+from PIL import Image
 
 from .decision_engine import assess_normality, decide_level1, decide_level2, filter_subtype_probabilities
 from .model_loader import LoadedClassifier, load_resnet50_classifier
@@ -66,9 +70,20 @@ class HierarchicalCancerInference:
         self.organ_checkpoint = Path(organ_checkpoint)
         self.subtype_checkpoint = Path(subtype_checkpoint)
 
-        self.organ_bundle = self._load_organ_model()
+        self.organ_bundle: LoadedClassifier | None = None
         self.subtype_bundle: LoadedClassifier | None = None
-        self._refresh_label_mappings(self.organ_bundle.metadata)
+        self.organ_model_error: str | None = None
+        self.subtype_model_error: str | None = None
+        self._refresh_label_mappings(None)
+
+        try:
+            self.organ_bundle = self._load_organ_model()
+        except Exception as exc:
+            self.organ_model_error = str(exc)
+            self.logger.exception('Failed to load organ model from %s', self.organ_checkpoint)
+        else:
+            self._refresh_label_mappings(self.organ_bundle.metadata)
+
         self._load_subtype_model_if_available(log_missing=False)
 
     def _load_organ_model(self) -> LoadedClassifier:
@@ -76,7 +91,9 @@ class HierarchicalCancerInference:
         return load_resnet50_classifier(checkpoint_path=self.organ_checkpoint, device=self.device)
 
     def _refresh_label_mappings(self, metadata: dict[str, object] | None = None) -> None:
-        organ_metadata = metadata if metadata and metadata.get('organ_to_idx') else self.organ_bundle.metadata
+        organ_metadata = metadata
+        if organ_metadata is None and self.organ_bundle is not None:
+            organ_metadata = self.organ_bundle.metadata
         self.organ_labels = build_organ_label_map(organ_metadata)
         self.organ_display_names = build_display_name_map(self.organ_labels)
         self.subtype_labels = build_subtype_label_map(metadata)
@@ -88,12 +105,20 @@ class HierarchicalCancerInference:
     def _load_subtype_model_if_available(self, log_missing: bool = True) -> bool:
         if self.subtype_bundle is not None:
             return True
+        if self.organ_bundle is None:
+            return False
         if not self.subtype_checkpoint.exists():
             if log_missing:
                 self.logger.warning('Subtype checkpoint is not available yet at %s', self.subtype_checkpoint)
             return False
         self.logger.info('Loading subtype model from %s', self.subtype_checkpoint)
-        self.subtype_bundle = load_resnet50_classifier(checkpoint_path=self.subtype_checkpoint, device=self.device)
+        try:
+            self.subtype_bundle = load_resnet50_classifier(checkpoint_path=self.subtype_checkpoint, device=self.device)
+        except Exception as exc:
+            self.subtype_model_error = str(exc)
+            self.logger.exception('Failed to load subtype model from %s', self.subtype_checkpoint)
+            return False
+        self.subtype_model_error = None
         self._refresh_label_mappings(self.subtype_bundle.metadata)
         return True
 
@@ -103,15 +128,80 @@ class HierarchicalCancerInference:
             probabilities = softmax_with_temperature(logits.squeeze(0), temperature=self.temperature).cpu()
         return probabilities
 
+    def _encode_png(self, image: Image.Image) -> str:
+        buffer = BytesIO()
+        image.save(buffer, format='PNG', optimize=True)
+        return base64.b64encode(buffer.getvalue()).decode('ascii')
+
+    def _build_gradcam_overlay(self, image: Image.Image, cam: torch.Tensor) -> Image.Image:
+        cam_array = cam.detach().cpu().clamp(0.0, 1.0).numpy()
+        heat = Image.fromarray(np.uint8(cam_array * 255), mode='L').resize(image.size, Image.Resampling.BILINEAR)
+        red = heat
+        green = heat.point(lambda value: int(min(255, value * 0.72)))
+        blue = heat.point(lambda value: int(max(0, 190 - value)))
+        heatmap = Image.merge('RGB', (red, green, blue))
+        return Image.blend(image.convert('RGB'), heatmap, alpha=0.38)
+
+    def _generate_gradcam(
+        self,
+        bundle: LoadedClassifier,
+        image_tensor: torch.Tensor,
+        original_image: Image.Image,
+        class_index: int,
+        title: str,
+        label: str,
+    ) -> dict[str, object] | None:
+        target_layer = bundle.model.layer4[-1]
+        activations: list[torch.Tensor] = []
+        gradients: list[torch.Tensor] = []
+
+        forward_handle = target_layer.register_forward_hook(lambda module, inputs, output: activations.append(output.detach()))
+        backward_handle = target_layer.register_full_backward_hook(lambda module, grad_input, grad_output: gradients.append(grad_output[0].detach()))
+        try:
+            bundle.model.zero_grad(set_to_none=True)
+            logits = bundle.model(image_tensor.to(self.device))
+            if class_index < 0 or class_index >= logits.shape[1]:
+                return None
+            score = logits[:, class_index].sum()
+            score.backward()
+            if not activations or not gradients:
+                return None
+
+            activation = activations[-1]
+            gradient = gradients[-1]
+            weights = gradient.mean(dim=(2, 3), keepdim=True)
+            cam = torch.relu((weights * activation).sum(dim=1))[0]
+            max_value = float(cam.max().item())
+            if max_value <= 0:
+                return None
+            cam = cam / max_value
+            overlay = self._build_gradcam_overlay(original_image, cam)
+            return {
+                'title': title,
+                'label': label,
+                'class_index': int(class_index),
+                'mime_type': 'image/png',
+                'image_base64': self._encode_png(overlay),
+            }
+        except Exception:
+            self.logger.exception('Grad-CAM generation failed for %s', label)
+            return None
+        finally:
+            forward_handle.remove()
+            backward_handle.remove()
+            bundle.model.zero_grad(set_to_none=True)
+
     def get_model_status(self) -> dict[str, object]:
         return {
             'device': str(self.device),
-            'organ_ready': True,
+            'organ_ready': self.organ_bundle is not None,
             'organ_loaded': self.organ_bundle is not None,
             'organ_checkpoint': str(self.organ_checkpoint),
+            'organ_error': self.organ_model_error,
             'subtype_ready': self.subtype_bundle is not None,
             'subtype_checkpoint_exists': self.subtype_checkpoint.exists(),
             'subtype_checkpoint': str(self.subtype_checkpoint),
+            'subtype_error': self.subtype_model_error,
             'organ_class_count': len(self.organ_labels),
             'subtype_class_count': len(self.subtype_labels),
             'temperature': self.temperature,
@@ -127,6 +217,16 @@ class HierarchicalCancerInference:
                 for class_index in sorted(self.organ_labels)
             ],
         }
+
+    def _build_service_unavailable_result(self, source_name: str, reason: str) -> dict[str, object]:
+        result = self._build_rejected_result(
+            source_name=source_name,
+            final_decision='Inference service unavailable',
+            reason=reason,
+            warnings=[reason],
+        )
+        result['model_status'] = self.get_model_status()
+        return result
 
     def _resolve_organ_index(self, organ_override: str | int | None) -> int | None:
         if organ_override is None:
@@ -199,6 +299,7 @@ class HierarchicalCancerInference:
             'warnings': warnings,
             'visualizations': visualizations,
             'charts': {'organ': None, 'subtype': None},
+            'gradcam': {'organ': None, 'subtype': None},
         }
     def _build_rejected_result(
         self,
@@ -308,15 +409,35 @@ class HierarchicalCancerInference:
     def _predict_from_tensor(
         self,
         image_tensor: torch.Tensor,
-        source_name: str,
-        validation_payload: dict[str, object],
-        modality_decision: dict[str, object],
+        original_image: Image.Image | str | None = None,
+        source_name: str | dict[str, object] | None = None,
+        validation_payload: dict[str, object] | None = None,
+        modality_decision: dict[str, object] | None = None,
         manual_override: bool = False,
         organ_override: str | int | None = None,
         visualize: bool = False,
         plot_dir: str | Path | None = None,
         show_plot: bool = False,
     ) -> dict[str, object]:
+        if isinstance(original_image, str) and isinstance(source_name, dict) and isinstance(validation_payload, dict):
+            modality_decision = validation_payload
+            validation_payload = source_name
+            source_name = original_image
+            original_image = None
+
+        if source_name is None:
+            source_name = 'unknown'
+        if validation_payload is None:
+            validation_payload = {}
+        if modality_decision is None:
+            modality_decision = {
+                'type': 'Not evaluated',
+                'status': 'NOT_EVALUATED',
+                'color': 'BLUE',
+                'confidence': None,
+                'override_allowed': False,
+            }
+
         result = self._build_base_result(source_name, validation=validation_payload)
         warnings = result['warnings']
         visualizations = result['visualizations']
@@ -382,6 +503,15 @@ class HierarchicalCancerInference:
         result['tissue'] = organ_decision
         result['organ_prediction'] = organ_decision
         result['charts']['organ'] = self._build_chart_payload('Organ/tissue probabilities', organ_decision['probability_distribution'])
+        if original_image is not None:
+            result['gradcam']['organ'] = self._generate_gradcam(
+                bundle=self.organ_bundle,
+                image_tensor=image_tensor,
+                original_image=original_image,
+                class_index=selected_organ_index,
+                title='Organ Attention Map',
+                label=organ_decision['selected_label'],
+            )
 
         if organ_decision['status'] == 'CLOSE_CONFIDENCE':
             warnings.append('Level 1 top tissue is strong, but the second candidate is close.')
@@ -451,6 +581,15 @@ class HierarchicalCancerInference:
             result['subtype'] = None
             result['subtype_prediction'] = None
             result['final_decision'] = normality_decision['final_decision']
+            if original_image is not None and self.subtype_bundle is not None and normality_decision.get('normal_class_index') is not None:
+                result['gradcam']['subtype'] = self._generate_gradcam(
+                    bundle=self.subtype_bundle,
+                    image_tensor=image_tensor,
+                    original_image=original_image,
+                    class_index=int(normality_decision['normal_class_index']),
+                    title='Subtype Attention Map',
+                    label=str(normality_decision.get('normal_label') or 'Normal tissue'),
+                )
             result['model_status'] = self.get_model_status()
             self.logger.info('Prediction complete for %s | tissue=%s | normality=NORMAL | normal_label=%s', source_name, organ_decision['selected_label'], normality_decision.get('normal_label'))
             return result
@@ -475,6 +614,15 @@ class HierarchicalCancerInference:
         result['level3'] = subtype_decision
         result['subtype'] = subtype_decision
         result['subtype_prediction'] = subtype_decision
+        if original_image is not None:
+            result['gradcam']['subtype'] = self._generate_gradcam(
+                bundle=self.subtype_bundle,
+                image_tensor=image_tensor,
+                original_image=original_image,
+                class_index=int(subtype_decision['class_index']),
+                title='Subtype Attention Map',
+                label=subtype_decision['interpreted_label'],
+            )
 
         if subtype_decision['status'] == 'MEDIUM_CONFIDENCE':
             warnings.append('Subtype probabilities are close; doctor review is recommended.')
@@ -519,6 +667,10 @@ class HierarchicalCancerInference:
         plot_dir: str | Path | None = None,
         show_plot: bool = False,
     ) -> dict[str, object]:
+        if self.organ_bundle is None:
+            reason = self.organ_model_error or 'Organ model is not available.'
+            return self._build_service_unavailable_result(source_name=source_name, reason=reason)
+
         step0_ok, validation_payload, validation_warnings, modality_decision, image_tensor = self._run_step0(
             image,
             source_name=source_name,
@@ -557,6 +709,7 @@ class HierarchicalCancerInference:
 
         result = self._predict_from_tensor(
             image_tensor=image_tensor,
+            original_image=image,
             source_name=source_name,
             validation_payload=validation_payload,
             modality_decision=modality_decision,

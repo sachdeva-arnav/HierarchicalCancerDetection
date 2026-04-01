@@ -309,6 +309,49 @@ select {
   gap: 10px;
 }
 
+.gradcam-card {
+  overflow: hidden;
+}
+
+.gradcam-header p {
+  margin: 4px 0 0;
+  color: var(--muted);
+}
+
+.gradcam-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 16px;
+}
+
+.gradcam-item {
+  padding: 14px;
+  border: 1px solid rgba(157, 176, 204, 0.12);
+  border-radius: 16px;
+  background: rgba(8, 16, 29, 0.8);
+}
+
+.gradcam-meta h4 {
+  margin: 0 0 6px;
+  font-size: 1rem;
+}
+
+.gradcam-meta p {
+  margin: 0 0 12px;
+  color: var(--muted);
+  font-size: 0.92rem;
+}
+
+.gradcam-image {
+  display: block;
+  width: 100%;
+  max-height: 280px;
+  object-fit: contain;
+  border-radius: 12px;
+  background: #02070d;
+}
+
 .chart-row {
   display: grid;
   grid-template-columns: minmax(110px, 220px) 1fr 62px;
@@ -395,6 +438,10 @@ select {
   .hero,
   .grid,
   .stage-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .gradcam-grid {
     grid-template-columns: 1fr;
   }
 }

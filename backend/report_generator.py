@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+import base64
 from io import BytesIO
 from pathlib import Path
 import textwrap
@@ -48,29 +49,29 @@ class PdfImageSpec:
 @dataclass(frozen=True)
 class PdfPage:
     body_commands: list[str]
-    uses_image: bool = False
+    image_names: tuple[str, ...] = ()
 
 
 class ReportCanvas:
     def __init__(self) -> None:
         self.pages: list[PdfPage] = []
         self.current_commands: list[str] = []
-        self.current_uses_image = False
+        self.current_image_names: set[str] = set()
         self.y = _PDF_TOP_Y
         self._start_page()
 
     def _start_page(self) -> None:
         if self.current_commands:
-            self.pages.append(PdfPage(self.current_commands, self.current_uses_image))
+            self.pages.append(PdfPage(self.current_commands, tuple(sorted(self.current_image_names))))
         self.current_commands = []
-        self.current_uses_image = False
+        self.current_image_names = set()
         self.y = _PDF_TOP_Y
 
     def finish(self) -> list[PdfPage]:
         if self.current_commands or not self.pages:
-            self.pages.append(PdfPage(self.current_commands, self.current_uses_image))
+            self.pages.append(PdfPage(self.current_commands, tuple(sorted(self.current_image_names))))
             self.current_commands = []
-            self.current_uses_image = False
+            self.current_image_names = set()
         return self.pages
 
     def ensure_space(self, height: float) -> None:
@@ -107,12 +108,12 @@ class ReportCanvas:
             'Q',
         ])
 
-    def draw_image(self, x: float, y: float, width: float, height: float) -> None:
-        self.current_uses_image = True
+    def draw_image(self, name: str, x: float, y: float, width: float, height: float) -> None:
+        self.current_image_names.add(name)
         self.current_commands.extend([
             'q',
             f'{width:.2f} 0 0 {height:.2f} {x:.2f} {y:.2f} cm',
-            '/Im1 Do',
+            f'/{name} Do',
             'Q',
         ])
 
@@ -179,12 +180,11 @@ def _decision_colors(result: dict[str, object]) -> tuple[tuple[float, float, flo
     return (_COLOR_DECISION_GREEN, _COLOR_DECISION_GREEN_BORDER) if _decision_outcome(result) == 'NORMAL' else (_COLOR_DECISION_RED, _COLOR_DECISION_RED_BORDER)
 
 
-def _prepare_pdf_image(image_bytes: bytes | None) -> PdfImageSpec | None:
+def _prepare_pdf_image(image_bytes: bytes | None, *, max_size: tuple[int, int] = (400, 240)) -> PdfImageSpec | None:
     if not image_bytes:
         return None
     with Image.open(BytesIO(image_bytes)) as image:
         image = image.convert('RGB')
-        max_size = (400, 240)
         image.thumbnail(max_size)
         width, height = image.size
         compressed_rgb = zlib.compress(image.tobytes(), level=9)
@@ -201,6 +201,33 @@ def _section_heading(canvas: ReportCanvas, title: str) -> None:
     canvas.ensure_space(24)
     canvas.text(_PDF_MARGIN, canvas.y, title, font='F2', size=13, color=_COLOR_TITLE)
     canvas.y -= 18
+
+
+def _decode_data_image(encoded: object | None) -> bytes | None:
+    if not encoded:
+        return None
+    try:
+        return base64.b64decode(str(encoded), validate=True)
+    except Exception:
+        return None
+
+
+def _report_images(result: dict[str, object], image_bytes: bytes | None) -> dict[str, PdfImageSpec]:
+    images: dict[str, PdfImageSpec] = {}
+    input_spec = _prepare_pdf_image(image_bytes, max_size=(280, 220))
+    if input_spec is not None:
+        images['ImInput'] = input_spec
+
+    gradcam = result.get('gradcam') or {}
+    organ_bytes = _decode_data_image((gradcam.get('organ') or {}).get('image_base64'))
+    subtype_bytes = _decode_data_image((gradcam.get('subtype') or {}).get('image_base64'))
+    organ_spec = _prepare_pdf_image(organ_bytes, max_size=(280, 220))
+    subtype_spec = _prepare_pdf_image(subtype_bytes, max_size=(280, 220))
+    if organ_spec is not None:
+        images['ImOrganCam'] = organ_spec
+    if subtype_spec is not None:
+        images['ImSubtypeCam'] = subtype_spec
+    return images
 
 
 def _draw_key_value_table(canvas: ReportCanvas, rows: list[tuple[str, str]], *, left_width: float = 148, value_width: float | None = None, font_size: int = 10) -> None:
@@ -283,42 +310,107 @@ def _draw_table(canvas: ReportCanvas, headers: list[str], rows: list[list[str]],
     canvas.y = current_y - 14
 
 
-def _draw_image_section(canvas: ReportCanvas, image_spec: PdfImageSpec | None) -> None:
-    _section_heading(canvas, '2. Input Image')
-    box_width = _PDF_CONTENT_WIDTH
-    box_height = 280 if image_spec else 90
-    canvas.ensure_space(box_height + 8)
+def _draw_summary_panel(canvas: ReportCanvas, rows: list[tuple[str, str]]) -> None:
+    box_height = 108
+    canvas.ensure_space(box_height + 10)
     top_y = canvas.y
     bottom_y = top_y - box_height
-    canvas.rect(_PDF_MARGIN, bottom_y, box_width, box_height, fill=(1.0, 1.0, 1.0), stroke=_COLOR_BORDER, line_width=0.8)
+    canvas.rect(_PDF_MARGIN, bottom_y, _PDF_CONTENT_WIDTH, box_height, fill=(1.0, 1.0, 1.0), stroke=_COLOR_BORDER, line_width=0.9)
+    canvas.text(_PDF_MARGIN + 14, top_y - 18, 'Executive Summary', font='F2', size=14, color=_COLOR_TITLE)
 
-    if image_spec is None:
-        canvas.text(_PDF_MARGIN + 18, top_y - 42, 'Input image unavailable for report export.', font='F3', size=11, color=_COLOR_MUTED)
-    else:
-        available_width = min(400.0, box_width - 32)
-        scale = min(1.0, available_width / image_spec.display_width)
-        draw_width = image_spec.display_width * scale
-        draw_height = image_spec.display_height * scale
-        x = _PDF_MARGIN + (box_width - draw_width) / 2
-        y = bottom_y + 38 + max(0.0, (box_height - 62 - draw_height) / 2)
-        canvas.draw_image(x, y, draw_width, draw_height)
-        canvas.text(_PDF_MARGIN + (box_width / 2) - 22, bottom_y + 14, 'Input Scan', font='F3', size=10, color=_COLOR_MUTED)
-
-    canvas.y = bottom_y - 14
+    left_x = _PDF_MARGIN + 14
+    right_x = _PDF_MARGIN + (_PDF_CONTENT_WIDTH / 2) + 8
+    left_y = top_y - 40
+    right_y = top_y - 40
+    for index, (label, value) in enumerate(rows):
+        target_x = left_x if index % 2 == 0 else right_x
+        target_y = left_y if index % 2 == 0 else right_y
+        wrapped = _wrap_text(value, (_PDF_CONTENT_WIDTH / 2) - 58, 10)
+        canvas.text(target_x, target_y, label, font='F2', size=10, color=_COLOR_MUTED)
+        for line_index, line in enumerate(wrapped[:2]):
+            canvas.text(target_x + 74, target_y - line_index * 11, line, size=10, color=_COLOR_TEXT)
+        if index % 2 == 0:
+            left_y -= max(18, len(wrapped[:2]) * 11 + 7)
+        else:
+            right_y -= max(18, len(wrapped[:2]) * 11 + 7)
+    canvas.y = bottom_y - 16
 
 
 def _draw_final_decision_box(canvas: ReportCanvas, result: dict[str, object]) -> None:
-    _section_heading(canvas, '3. Final Decision')
     fill, border = _decision_colors(result)
-    box_height = 108
+    reason_lines = _wrap_text(result.get('reason') or 'AI-generated decision support summary prepared for review.', _PDF_CONTENT_WIDTH - 42, 10)
+    box_height = max(138, 106 + len(reason_lines) * 12)
     canvas.ensure_space(box_height + 8)
     top_y = canvas.y
     bottom_y = top_y - box_height
     canvas.rect(_PDF_MARGIN, bottom_y, _PDF_CONTENT_WIDTH, box_height, fill=fill, stroke=border, line_width=1.0)
-    canvas.text(_PDF_MARGIN + 16, top_y - 24, f'Outcome: {_decision_outcome(result)}', font='F2', size=14)
-    canvas.text(_PDF_MARGIN + 16, top_y - 48, f'Label: {_safe(result.get("final_decision"), "N/A")}', size=11)
-    canvas.text(_PDF_MARGIN + 16, top_y - 70, f'Confidence: {_decision_confidence(result)}', size=11)
+    canvas.text(_PDF_MARGIN + 16, top_y - 22, 'Final Decision', font='F2', size=13, color=_COLOR_MUTED)
+    canvas.text(_PDF_MARGIN + 16, top_y - 45, _safe(result.get('final_decision'), 'N/A'), font='F2', size=19, color=_COLOR_TITLE)
+    canvas.text(_PDF_MARGIN + 16, top_y - 68, f'Outcome: {_decision_outcome(result)}', font='F2', size=11)
+    canvas.text(_PDF_MARGIN + 200, top_y - 68, f'Confidence: {_decision_confidence(result)}', size=11)
+    canvas.text(_PDF_MARGIN + 16, top_y - 90, f'Label: {_safe(result.get("final_decision"), "N/A")}', size=11)
+    organ_label = _safe((result.get('organ_prediction') or {}).get('selected_label') or (result.get('organ_prediction') or {}).get('label'), 'N/A')
+    subtype_label = _safe((result.get('subtype_prediction') or {}).get('interpreted_label') or (result.get('normality') or {}).get('normal_label') or (result.get('normality') or {}).get('label'), 'N/A')
+    canvas.text(_PDF_MARGIN + 200, top_y - 90, f'Pipeline Status: {_safe(result.get("status"))}', size=11)
+    text_y = top_y - 112
+    canvas.text(_PDF_MARGIN + 16, text_y, f'Tissue Route: {organ_label}', size=11)
+    canvas.text(_PDF_MARGIN + 250, text_y, f'Subtype / Outcome Detail: {subtype_label}', size=11)
+    text_y -= 18
+    for line in reason_lines:
+        canvas.text(_PDF_MARGIN + 16, text_y, line, size=10)
+        text_y -= 12
     canvas.y = bottom_y - 14
+
+
+def _draw_visual_card(
+    canvas: ReportCanvas,
+    x: float,
+    top_y: float,
+    width: float,
+    height: float,
+    *,
+    title: str,
+    image_name: str | None,
+    image_spec: PdfImageSpec | None,
+    caption: str,
+) -> None:
+    bottom_y = top_y - height
+    canvas.rect(x, bottom_y, width, height, fill=(1.0, 1.0, 1.0), stroke=_COLOR_BORDER, line_width=0.8)
+    canvas.text(x + 12, top_y - 18, title, font='F2', size=12, color=_COLOR_TITLE)
+    image_top = top_y - 34
+    image_height = height - 62
+    if image_name is None or image_spec is None:
+        canvas.text(x + 12, image_top - 20, 'Visual unavailable for this section.', font='F3', size=10, color=_COLOR_MUTED)
+    else:
+        available_width = width - 24
+        available_height = image_height
+        scale = min(available_width / image_spec.display_width, available_height / image_spec.display_height, 1.0)
+        draw_width = image_spec.display_width * scale
+        draw_height = image_spec.display_height * scale
+        draw_x = x + 12 + (available_width - draw_width) / 2
+        draw_y = bottom_y + 26 + (available_height - draw_height) / 2
+        canvas.draw_image(image_name, draw_x, draw_y, draw_width, draw_height)
+    canvas.text(x + 12, bottom_y + 10, caption, font='F3', size=9, color=_COLOR_MUTED)
+
+
+def _draw_visual_section(canvas: ReportCanvas, result: dict[str, object], images: dict[str, PdfImageSpec]) -> None:
+    _section_heading(canvas, 'Visual Review')
+    has_input = 'ImInput' in images
+    has_organ_cam = 'ImOrganCam' in images
+    has_subtype_cam = 'ImSubtypeCam' in images
+    card_gap = 14
+    card_width = (_PDF_CONTENT_WIDTH - card_gap) / 2
+    card_height = 228
+    canvas.ensure_space(card_height * (2 if has_subtype_cam and has_organ_cam and has_input else 1) + 12)
+    top_y = canvas.y
+    _draw_visual_card(canvas, _PDF_MARGIN, top_y, card_width, card_height, title='Input Scan', image_name='ImInput' if has_input else None, image_spec=images.get('ImInput'), caption='Submitted image used for analysis.')
+    organ_label = _safe((result.get('gradcam') or {}).get('organ', {}).get('label'), 'Organ attention not available')
+    _draw_visual_card(canvas, _PDF_MARGIN + card_width + card_gap, top_y, card_width, card_height, title='Grad-CAM: Organ Routing', image_name='ImOrganCam' if has_organ_cam else None, image_spec=images.get('ImOrganCam'), caption=organ_label)
+    canvas.y = top_y - card_height - 18
+    if has_subtype_cam:
+        subtype_label = _safe((result.get('gradcam') or {}).get('subtype', {}).get('label'), 'Subtype attention not available')
+        _draw_visual_card(canvas, _PDF_MARGIN, canvas.y, _PDF_CONTENT_WIDTH, 220, title='Grad-CAM: Final Outcome', image_name='ImSubtypeCam', image_spec=images.get('ImSubtypeCam'), caption=subtype_label)
+        canvas.y -= 234
 
 
 def _system_info_rows(result: dict[str, object], generated_at: str) -> list[tuple[str, str]]:
@@ -362,7 +454,7 @@ def _warning_lines(result: dict[str, object]) -> list[str]:
 
 
 def _draw_warning_box(canvas: ReportCanvas, warnings: list[str]) -> None:
-    _section_heading(canvas, '7. Warnings / Notes')
+    _section_heading(canvas, 'Warnings / Notes')
     wrapped: list[str] = []
     for warning in warnings:
         wrapped.extend(_wrap_text(f'- {warning}', _PDF_CONTENT_WIDTH - 24, 10))
@@ -384,8 +476,8 @@ def _build_page_stream(page: PdfPage, title: str, subtitle: str, page_number: in
         f'{_COLOR_HEADER_BG[0]:.3f} {_COLOR_HEADER_BG[1]:.3f} {_COLOR_HEADER_BG[2]:.3f} rg',
         f'{_PDF_MARGIN} {_PDF_PAGE_HEIGHT - _PDF_MARGIN - _PDF_HEADER_BAND} {_PDF_CONTENT_WIDTH} {_PDF_HEADER_BAND} re f',
         'Q',
-        'BT', '/F2 20 Tf', f'{_COLOR_TITLE[0]:.3f} {_COLOR_TITLE[1]:.3f} {_COLOR_TITLE[2]:.3f} rg', f'1 0 0 1 {_PDF_MARGIN + 16:.2f} {_PDF_PAGE_HEIGHT - _PDF_MARGIN - 30:.2f} Tm', f'({_pdf_escape(title)}) Tj', 'ET',
-        'BT', '/F3 11 Tf', f'{_COLOR_MUTED[0]:.3f} {_COLOR_MUTED[1]:.3f} {_COLOR_MUTED[2]:.3f} rg', f'1 0 0 1 {_PDF_MARGIN + 16:.2f} {_PDF_PAGE_HEIGHT - _PDF_MARGIN - 50:.2f} Tm', f'({_pdf_escape(subtitle)}) Tj', 'ET',
+        'BT', '/F2 19 Tf', f'{_COLOR_TITLE[0]:.3f} {_COLOR_TITLE[1]:.3f} {_COLOR_TITLE[2]:.3f} rg', f'1 0 0 1 {_PDF_MARGIN + 16:.2f} {_PDF_PAGE_HEIGHT - _PDF_MARGIN - 30:.2f} Tm', f'({_pdf_escape(title)}) Tj', 'ET',
+        'BT', '/F3 10 Tf', f'{_COLOR_MUTED[0]:.3f} {_COLOR_MUTED[1]:.3f} {_COLOR_MUTED[2]:.3f} rg', f'1 0 0 1 {_PDF_MARGIN + 16:.2f} {_PDF_PAGE_HEIGHT - _PDF_MARGIN - 50:.2f} Tm', f'({_pdf_escape(subtitle)}) Tj', 'ET',
         'BT', '/F3 9 Tf', f'{_COLOR_MUTED[0]:.3f} {_COLOR_MUTED[1]:.3f} {_COLOR_MUTED[2]:.3f} rg', f'1 0 0 1 {_PDF_MARGIN:.2f} {_PDF_MARGIN + 8:.2f} Tm', f'({_pdf_escape("This report is AI-generated and should not replace clinical diagnosis.")}) Tj', 'ET',
         'BT', '/F3 9 Tf', f'{_COLOR_MUTED[0]:.3f} {_COLOR_MUTED[1]:.3f} {_COLOR_MUTED[2]:.3f} rg', f'1 0 0 1 {_PDF_PAGE_WIDTH - _PDF_MARGIN - 72:.2f} {_PDF_MARGIN + 8:.2f} Tm', f'({_pdf_escape(f"Page {page_number} of {total_pages}")}) Tj', 'ET',
     ]
@@ -395,60 +487,55 @@ def _build_page_stream(page: PdfPage, title: str, subtitle: str, page_number: in
 def _build_pdf_bytes(result: dict[str, object], image_name: str, image_bytes: bytes | None = None) -> bytes:
     generated_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     title = 'Hierarchical Cancer Classification Report'
-    subtitle = 'AI-Assisted Decision Support Output'
-    image_spec = _prepare_pdf_image(image_bytes)
+    subtitle = f'AI-assisted decision support summary for {_safe(image_name, "uploaded image")}'
+    report_images = _report_images(result, image_bytes)
 
     canvas = ReportCanvas()
-
-    _section_heading(canvas, '1. Header Section')
-    canvas.text(_PDF_MARGIN, canvas.y, title, font='F2', size=18, color=_COLOR_TITLE)
-    canvas.y -= 20
-    canvas.text(_PDF_MARGIN, canvas.y, subtitle, font='F3', size=11, color=_COLOR_MUTED)
-    canvas.y -= 18
-    _draw_key_value_table(canvas, _system_info_rows(result, generated_at), left_width=150)
-
-    _draw_image_section(canvas, image_spec)
+    _draw_summary_panel(canvas, _system_info_rows(result, generated_at))
     _draw_final_decision_box(canvas, result)
+    _draw_visual_section(canvas, result, report_images)
 
-    _section_heading(canvas, '4. Level 2: Normality Analysis')
+    _section_heading(canvas, 'Clinical Routing Summary')
     _draw_key_value_table(canvas, _normality_rows(result), left_width=150)
 
-    _section_heading(canvas, '5. Organ / Tissue Probabilities')
+    _section_heading(canvas, 'Organ / Tissue Probabilities')
     _draw_table(canvas, ['Organ', 'Probability (%)'], _organ_probability_rows(result), [340, 164])
 
     subtype_rows = _subtype_probability_rows(result)
     if subtype_rows:
-        _section_heading(canvas, '6. Subtype Probabilities')
+        _section_heading(canvas, 'Subtype Probabilities')
         _draw_table(canvas, ['Subtype', 'Probability (%)'], subtype_rows, [340, 164])
 
     _draw_warning_box(canvas, _warning_lines(result))
 
     pages = canvas.finish()
 
-    image_object_id = 6 if image_spec is not None else None
-    first_page_object_id = 7 if image_spec is not None else 6
     object_bodies: dict[int, bytes] = {
         1: b'<< /Type /Catalog /Pages 2 0 R >>',
         3: b'<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
         4: b'<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>',
         5: b'<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Oblique >>',
     }
-    if image_spec is not None and image_object_id is not None:
-        object_bodies[image_object_id] = (
+    image_object_ids: dict[str, int] = {}
+    next_object_id = 6
+    for image_name_key, image_spec in report_images.items():
+        image_object_ids[image_name_key] = next_object_id
+        object_bodies[next_object_id] = (
             f'<< /Type /XObject /Subtype /Image /Width {image_spec.width} /Height {image_spec.height} '
             f'/ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode /Length {len(image_spec.compressed_rgb)} >>\nstream\n'.encode('ascii')
             + image_spec.compressed_rgb
             + b'\nendstream'
         )
+        next_object_id += 1
 
     page_object_ids: list[int] = []
-    next_object_id = first_page_object_id
     for index, page in enumerate(pages, start=1):
         page_object_id = next_object_id
         content_object_id = next_object_id + 1
         page_object_ids.append(page_object_id)
         stream = _build_page_stream(page, title, subtitle, index, len(pages))
-        xobject_part = f' /XObject << /Im1 {image_object_id} 0 R >>' if page.uses_image and image_object_id is not None else ''
+        xobject_entries = ' '.join(f'/{name} {image_object_ids[name]} 0 R' for name in page.image_names if name in image_object_ids)
+        xobject_part = f' /XObject << {xobject_entries} >>' if xobject_entries else ''
         object_bodies[page_object_id] = (
             f'<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {_PDF_PAGE_WIDTH} {_PDF_PAGE_HEIGHT}] '
             f'/Resources << /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R >>{xobject_part} >> /Contents {content_object_id} 0 R >>'
