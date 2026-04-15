@@ -21,7 +21,7 @@ echo Keep that backend window open while using the interface.
 echo Press Ctrl+C in that backend window to stop the app later.
 echo.
 
-start "Cancer Classifier Backend" cmd /k ""%PYTHON_EXE%" -m backend.web_app --device cuda"
+start "Cancer Classifier Backend" cmd /k ""%PYTHON_EXE%" -m backend.web_app"
 
 timeout /t 4 /nobreak >nul
 start "" "%APP_URL%"

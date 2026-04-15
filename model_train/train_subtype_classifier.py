@@ -1,0 +1,7 @@
+from __future__ import annotations
+
+from train_classifier import main
+
+
+if __name__ == "__main__":
+    main(default_target="subtype")

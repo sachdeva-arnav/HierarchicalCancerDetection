@@ -1,0 +1,50 @@
+{
+  "terminal.integrated.defaultProfile.windows": "Command Prompt",
+  "C_Cpp.default.compilerPath": "C:/ProgramData/mingw64/mingw64/bin/gcc.exe",
+  "editor.formatOnSave": true,
+  // No global formatter. Use per-language control.
+  "editor.defaultFormatter": null,
+  "[javascript]": {
+    "editor.defaultFormatter": "esbenp.prettier-vscode"
+  },
+  "[html]": {
+    "editor.defaultFormatter": "esbenp.prettier-vscode"
+  },
+  "[css]": {
+    "editor.defaultFormatter": "esbenp.prettier-vscode"
+  },
+  "[python]": {
+    "editor.defaultFormatter": "ms-python.black-formatter",
+    "editor.formatOnSave": true
+  },
+  "[json]": {
+    "editor.defaultFormatter": "vscode.json-language-features",
+    "editor.formatOnSave": true
+  },
+  "[jsonc]": {
+    "editor.defaultFormatter": "vscode.json-language-features",
+    "editor.formatOnSave": true
+  },
+  "[java]": {
+    "editor.formatOnSave": true
+  },
+  "html.format.enable": false,
+  "workbench.colorCustomizations": {
+    "statusBar.background": "#2b2b2b",
+    "statusBar.noFolderBackground": "#2b2b2b",
+    "statusBar.debuggingBackground": "#2b2b2b",
+    "statusBar.foreground": "#ffffff"
+  },
+  "editor.semanticHighlighting.enabled": true,
+  "editor.semanticTokenColorCustomizations": {
+    "enabled": true,
+    "rules": {
+      "namespace": {
+        "foreground": "#9CDCFE"
+      },
+      "parameter": {
+        "foreground": "#C586C0"
+      }
+    }
+  }
+}

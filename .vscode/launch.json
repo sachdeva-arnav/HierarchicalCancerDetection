@@ -1,0 +1,37 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Cancer Classifier: Web App",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "backend.web_app",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "args": [
+                "--device",
+                "cpu"
+            ]
+        },
+        {
+            "name": "Cancer Classifier: Predict Image",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "backend.inference_engine",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "args": [
+                "${input:imagePath}",
+                "--device",
+                "cpu"
+            ]
+        }
+    ],
+    "inputs": [
+        {
+            "id": "imagePath",
+            "type": "promptString",
+            "description": "Path to the image to classify"
+        }
+    ]
+}
